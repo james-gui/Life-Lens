@@ -10,7 +10,9 @@ class AudioManager {
         if (this.isInitialized) return Promise.resolve();
 
         // We create the AudioContext on user gesture (e.g. click "Begin Session")
-        this.audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+        // Use default sample rate (44.1k/48k) so video audio works. Gemini mic resamples separately.
+        this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        this.audioContext.resume(); // Ensure running — gesture context may have expired in async chain
         this.isInitialized = true;
         log('AudioManager: initialized AudioContext at ' + this.audioContext.sampleRate + 'Hz');
 

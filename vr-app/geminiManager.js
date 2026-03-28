@@ -84,7 +84,7 @@ class GeminiManager {
 
         const setupMessage = {
             setup: {
-                model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
+                model: "models/gemini-3.1-flash-live-preview",
                 generationConfig: {
                     responseModalities: ["AUDIO"],
                     speechConfig: {
@@ -139,9 +139,12 @@ class GeminiManager {
                 if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                     const inputData = e.inputBuffer.getChannelData(0);
 
-                    const pcm16 = new Int16Array(inputData.length);
-                    for (let i = 0; i < inputData.length; i++) {
-                        let s = Math.max(-1, Math.min(1, inputData[i]));
+                    // Downsample from AudioContext rate (48kHz) to 16kHz for Gemini
+                    const ratio = this.audioContext.sampleRate / 16000;
+                    const outputLength = Math.floor(inputData.length / ratio);
+                    const pcm16 = new Int16Array(outputLength);
+                    for (let i = 0; i < outputLength; i++) {
+                        let s = Math.max(-1, Math.min(1, inputData[Math.floor(i * ratio)]));
                         pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
 
@@ -154,10 +157,10 @@ class GeminiManager {
 
                     const audioMessage = {
                         realtimeInput: {
-                            mediaChunks: [{
+                            audio: {
                                 mimeType: "audio/pcm;rate=16000",
                                 data: base64
-                            }]
+                            }
                         }
                     };
 
@@ -202,44 +205,67 @@ class GeminiManager {
     }
 
     handleParsedMessage(data) {
-        // Log setup complete acknowledgement
         if (data.setupComplete) {
-            log('GeminiManager: setup complete acknowledged by server');
+            log('GeminiManager: setup complete acknowledged');
             return;
         }
 
-        if (data.serverContent && data.serverContent.modelTurn) {
-            const parts = data.serverContent.modelTurn.parts;
-            for (const part of parts) {
-                if (part.inlineData && part.inlineData.mimeType && part.inlineData.mimeType.startsWith('audio/pcm')) {
-                    this.queueAudio(part.inlineData.data);
-                }
-                if (part.functionCall) {
-                    this.handleFunctionCall(part.functionCall);
+        // Handle tool calls at the top level
+        if (data.toolCall) {
+            log('GeminiManager: top-level toolCall received');
+            var fcs = data.toolCall.functionCalls || [];
+            for (var i = 0; i < fcs.length; i++) {
+                this.handleFunctionCall(fcs[i]);
+            }
+            return;
+        }
+
+        if (data.serverContent) {
+            var sc = data.serverContent;
+
+            if (sc.turnComplete) {
+                log('GeminiManager: turnComplete');
+            }
+
+            if (sc.modelTurn && sc.modelTurn.parts) {
+                var parts = sc.modelTurn.parts;
+                for (var i = 0; i < parts.length; i++) {
+                    var part = parts[i];
+                    if (part.inlineData && part.inlineData.mimeType && part.inlineData.mimeType.startsWith('audio/pcm')) {
+                        this.queueAudio(part.inlineData.data);
+                    }
+                    if (part.functionCall) {
+                        this.handleFunctionCall(part.functionCall);
+                    }
                 }
             }
         }
     }
 
     handleFunctionCall(functionCall) {
+        log('GeminiManager: functionCall received: ' + JSON.stringify(functionCall));
+
         if (functionCall.name === "switch_scene") {
             const args = functionCall.args;
-            log('GeminiManager: LLM triggered switch_scene with args: ' + JSON.stringify(args));
+            log('GeminiManager: switch_scene triggered with args: ' + JSON.stringify(args));
 
             // Tell sceneManager to crossfade
             if (sceneManager && sceneManager.switchScene) {
                 sceneManager.switchScene(args.scene_name || 'dummy');
             }
 
-            // Let Gemini know the scene was successfully switched
+            // Send tool response back so Gemini continues the conversation
             const toolResponse = {
                 toolResponse: {
                     functionResponses: [{
-                        response: { output: "Scene switched successfully." },
-                        id: functionCall.id
+                        response: {
+                            result: { string_value: "Scene switched to " + (args.scene_name || "unknown") + " successfully." }
+                        },
+                        id: functionCall.id || ""
                     }]
                 }
             };
+            log('GeminiManager: sending toolResponse: ' + JSON.stringify(toolResponse));
             if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                 this.ws.send(JSON.stringify(toolResponse));
             }

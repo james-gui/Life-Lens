@@ -190,6 +190,7 @@ function setupControllers() {
   for (var i = 0; i < 2; i++) {
     var controller = renderer.xr.getController(i);
     controller.addEventListener('selectstart', onSelectStart);
+    controller.addEventListener('selectend', onSelectEnd);
     controller.addEventListener('connected', function (event) {
       log('Controller connected: ' + event.data.handedness + ' (' + event.data.targetRayMode + ')');
     });
@@ -207,9 +208,11 @@ function setupControllers() {
   }
 }
 
+var exitPressStart = 0;
+var EXIT_HOLD_TIME = 1000; // Must hold for 1 second to exit
+
 function onSelectStart(event) {
   var controller = event.target;
-  log('selectstart on controller');
 
   tempMatrix.identity().extractRotation(controller.matrixWorld);
   raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
@@ -217,8 +220,21 @@ function onSelectStart(event) {
 
   var intersects = raycaster.intersectObjects(exitButton.children, true);
   if (intersects.length > 0) {
-    log('Exit button hit — ending session');
-    endVRSession();
+    exitPressStart = Date.now();
+    log('Exit button press started — hold for 1s to exit');
+  }
+}
+
+function onSelectEnd(event) {
+  if (exitPressStart > 0) {
+    var held = Date.now() - exitPressStart;
+    exitPressStart = 0;
+    if (held >= EXIT_HOLD_TIME) {
+      log('Exit button held ' + held + 'ms — ending session');
+      endVRSession();
+    } else {
+      log('Exit button released too early (' + held + 'ms) — ignoring');
+    }
   }
 }
 
@@ -236,6 +252,9 @@ function onSessionStart() {
   });
 
   log('=== XR SESSION STARTED ===');
+
+  // Resume AudioContext in case it was suspended (VR entry is a user gesture)
+  if (audioManager.audioContext) audioManager.audioContext.resume();
 
   // Unmute now — the "Enter VR" click counts as a user gesture
   if (sceneManager.videoElement1) {
@@ -287,10 +306,11 @@ function endVRSession() {
 // Render Loop
 // ——————————————————————————————————————
 function animate() {
+  try {
   frameCount++;
 
-  // Log video state periodically (every 120 frames ~2s)
-  if (frameCount % 120 === 0 && sceneManager.videoElement1) {
+  // Log video state periodically (every 300 frames ~5s)
+  if (frameCount % 300 === 0 && sceneManager.videoElement1) {
     log('frame=' + frameCount +
       ' | playing=' + !sceneManager.videoElement1.paused +
       ' | inVR=' + isInVR);
@@ -317,6 +337,10 @@ function animate() {
   }
 
   renderer.render(scene, camera);
+  } catch (err) {
+    // Prevent JS errors from crashing the XR session
+    if (frameCount % 300 === 0) log('animate() error: ' + err.message);
+  }
 }
 
 // ——————————————————————————————————————
@@ -344,11 +368,11 @@ startBtn.addEventListener('click', function () {
   // 1. Initialize scene (loads textures, sets up 360 spheres)
   sceneManager.init(scene)
     .then(function () {
-      sceneManager.startPlayback();
       // 2. Initialize Audio Manager (user gesture allows AudioContext)
       return audioManager.init();
     })
     .then(function () {
+      sceneManager.startPlayback();
       // 3. Connect Gemini Live via WebSocket
       return geminiManager.connect();
     })
