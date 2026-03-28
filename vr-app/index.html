@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VR Therapy - 360 Video</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      overflow: hidden;
+    }
+
+    #overlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.85);
+    }
+
+    #overlay h1 {
+      font-size: 2rem;
+      margin-bottom: 1rem;
+      font-weight: 300;
+    }
+
+    #overlay p {
+      font-size: 1rem;
+      opacity: 0.7;
+      margin-bottom: 2rem;
+    }
+
+    #start-btn {
+      padding: 16px 48px;
+      font-size: 1.2rem;
+      border: 2px solid #fff;
+      background: transparent;
+      color: #fff;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    #start-btn:hover {
+      background: #fff;
+      color: #000;
+    }
+
+    #enter-vr {
+      display: none;
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      padding: 14px 40px;
+      font-size: 1.1rem;
+      border: 2px solid #4af;
+      background: rgba(68, 170, 255, 0.15);
+      color: #4af;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    #status {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      z-index: 20;
+      font-size: 0.9rem;
+      opacity: 0.6;
+    }
+  </style>
+</head>
+<body>
+  <div id="status">Loading...</div>
+
+  <div id="overlay">
+    <h1>VR Therapy Session</h1>
+    <p>Click to load the video, then enter VR</p>
+    <button id="start-btn">Begin Session</button>
+  </div>
+
+  <button id="enter-vr">Enter VR</button>
+
+  <!-- Hidden video element — Three.js reads from this -->
+  <video id="video" crossorigin="anonymous" playsinline loop style="display:none;"></video>
+
+  <!-- Served locally by FastAPI — no CDN dependency -->
+  <script src="three.min.js"></script>
+  <script src="main.js"></script>
+</body>
+</html>
