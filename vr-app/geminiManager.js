@@ -1,8 +1,7 @@
 class GeminiManager {
     constructor() {
         this.ws = null;
-        // HARDCODED API KEY AS REQUESTED (for demo purposes)
-        this.apiKey = "REPLACE_WITH_YOUR_GEMINI_API_KEY";
+        this.apiKey = null;
 
         this.audioContext = null;
         this.processorNode = null;
@@ -17,6 +16,21 @@ class GeminiManager {
     async connect() {
         log('GeminiManager: Connecting to Gemini Live API...');
 
+        // 0. Fetch API key from server
+        try {
+            const res = await fetch('/api/config');
+            const config = await res.json();
+            this.apiKey = config.geminiApiKey;
+        } catch (err) {
+            log('GeminiManager error: failed to fetch API key from server');
+            return;
+        }
+
+        if (!this.apiKey || this.apiKey === 'REPLACE_WITH_YOUR_GEMINI_API_KEY') {
+            log('GeminiManager error: set GEMINI_API_KEY in .env file');
+            return;
+        }
+
         // 1. We share the AudioContext from audioManager since it's already initialized by a user gesture
         this.audioContext = audioManager.audioContext;
         if (!this.audioContext) {
@@ -25,7 +39,7 @@ class GeminiManager {
         }
 
         // 2. Open WebSocket
-        const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${this.apiKey}`;
+        const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${this.apiKey}`;
         this.ws = new WebSocket(url);
 
         this.ws.onopen = this.onOpen.bind(this);
@@ -40,13 +54,22 @@ class GeminiManager {
     onOpen() {
         log('GeminiManager: WebSocket opened. Sending setup config...');
 
+        // v1beta raw WebSocket format — uses "setup" wrapper
         const setupMessage = {
             setup: {
-                model: "models/gemini-2.0-flash-exp",
+                model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
+                generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: "Aoede" }
+                        }
+                    }
+                },
                 systemInstruction: {
                     parts: [{
                         text: `You are a therapist guiding a patient through a structured VR meditation session. You MUST follow this script sequentially stage-by-stage.
-            
+
 Stage 1 (Start): You are in the 'meadow'. Welcome the user and lead a 3-breath grounding exercise. Say "breathe in", wait, then say "breathe out" etc. Wait for the user to respond before continuing.
 Stage 2 (Middle): When they are relaxed from Stage 1, call the switch_scene tool with scene_name="ocean". Guide them to visualize the waves washing away their tension.
 Stage 3 (End): When they are fully relaxed, call switch_scene with scene_name="mountain". Provide a final grounding message to gently conclude the session.
@@ -76,9 +99,7 @@ Rules:
             }
         };
 
-        // Optional: add voice selection if desired (Puck, Charon, Aoede)
-        // setupMessage.setup.generationConfig = { speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } } };
-
+        log('GeminiManager: Sending setup: ' + JSON.stringify(setupMessage).substring(0, 200) + '...');
         this.ws.send(JSON.stringify(setupMessage));
     }
 
@@ -142,21 +163,44 @@ Rules:
 
     onMessage(event) {
         let data;
+
+        // The Live API can send binary Blob frames — skip those
+        if (event.data instanceof Blob) {
+            // Convert Blob to text first, then parse
+            event.data.text().then((text) => {
+                try {
+                    const parsed = JSON.parse(text);
+                    this.handleParsedMessage(parsed);
+                } catch (e) {
+                    log('GeminiManager: received non-JSON blob (' + event.data.size + ' bytes)');
+                }
+            });
+            return;
+        }
+
         try {
             data = JSON.parse(event.data);
         } catch (e) {
-            log('GeminiManager error: failed to parse incoming message');
+            log('GeminiManager error: failed to parse incoming message: ' + String(event.data).substring(0, 100));
+            return;
+        }
+
+        this.handleParsedMessage(data);
+    }
+
+    handleParsedMessage(data) {
+        // Log setup complete acknowledgement
+        if (data.setupComplete) {
+            log('GeminiManager: setup complete acknowledged by server');
             return;
         }
 
         if (data.serverContent && data.serverContent.modelTurn) {
             const parts = data.serverContent.modelTurn.parts;
             for (const part of parts) {
-                // Handle incoming audio
-                if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
+                if (part.inlineData && part.inlineData.mimeType && part.inlineData.mimeType.startsWith('audio/pcm')) {
                     this.queueAudio(part.inlineData.data);
                 }
-                // Handle incoming tool call
                 if (part.functionCall) {
                     this.handleFunctionCall(part.functionCall);
                 }

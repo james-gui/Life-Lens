@@ -11,17 +11,27 @@ Usage:
 Then open http://<your-local-ip>:8000 on the Quest browser.
 """
 
+import os
 import socket
 from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 app = FastAPI(title="VR Therapy Server")
 
 BASE_DIR = Path(__file__).parent
 ASSETS_DIR = BASE_DIR / "assets"
+
+
+@app.get("/api/config")
+async def get_config():
+    key = os.getenv("GEMINI_API_KEY", "")
+    return JSONResponse({"geminiApiKey": key})
 
 
 # ——————————————————————————————————————
