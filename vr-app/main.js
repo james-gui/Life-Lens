@@ -7,7 +7,7 @@ var VIDEO_URL = 'assets/video.mp4';
 // Globals
 // ——————————————————————————————————————
 var camera, scene, renderer;
-var videoElement, videoTexture, videoSphere;
+var exitButton, exitButtonMaterial;
 var exitButton, exitButtonMaterial;
 var controllers = [];
 var raycaster = new THREE.Raycaster();
@@ -140,62 +140,7 @@ function setupVRButton() {
 // ——————————————————————————————————————
 // Video Setup
 // ——————————————————————————————————————
-function loadVideo() {
-  return new Promise(function (resolve, reject) {
-    videoElement = document.getElementById('video');
-    videoElement.src = VIDEO_URL;
-    videoElement.loop = true;
-    videoElement.playsInline = true;
-    videoElement.crossOrigin = 'anonymous';
-    videoElement.setAttribute('webkit-playsinline', '');
-
-    // Quest autoplay requires muted — we unmute after first play
-    videoElement.muted = true;
-
-    log('Video src set: ' + VIDEO_URL);
-    log('Video muted: true (required for Quest autoplay)');
-
-    videoElement.addEventListener('loadstart', function () { log('Video event: loadstart'); });
-    videoElement.addEventListener('loadedmetadata', function () {
-      log('Video event: loadedmetadata — ' + videoElement.videoWidth + 'x' + videoElement.videoHeight +
-        ', duration: ' + videoElement.duration.toFixed(1) + 's');
-    });
-    videoElement.addEventListener('loadeddata', function () { log('Video event: loadeddata'); });
-    videoElement.addEventListener('canplay', function () { log('Video event: canplay'); });
-    videoElement.addEventListener('canplaythrough', function () {
-      log('Video event: canplaythrough — resolving');
-      resolve();
-    }, { once: true });
-    videoElement.addEventListener('playing', function () { log('Video event: playing'); });
-    videoElement.addEventListener('pause', function () { log('Video event: pause'); });
-    videoElement.addEventListener('waiting', function () { log('Video event: waiting (buffering)'); });
-    videoElement.addEventListener('stalled', function () { log('Video event: stalled'); });
-    videoElement.addEventListener('error', function () {
-      var err = videoElement.error;
-      var msg = err ? 'code=' + err.code + ' msg=' + err.message : 'unknown';
-      log('Video ERROR: ' + msg);
-      reject(new Error('Video load failed: ' + msg));
-    });
-
-    videoElement.load();
-  });
-}
-
-function createVideoSphere() {
-  var geometry = new THREE.SphereGeometry(500, 60, 40);
-  geometry.scale(-1, 1, 1); // Invert so faces point inward
-
-  videoTexture = new THREE.VideoTexture(videoElement);
-  videoTexture.colorSpace = THREE.SRGBColorSpace;
-  videoTexture.minFilter = THREE.LinearFilter;
-  videoTexture.magFilter = THREE.LinearFilter;
-  videoTexture.generateMipmaps = false;
-
-  var material = new THREE.MeshBasicMaterial({ map: videoTexture });
-  videoSphere = new THREE.Mesh(geometry, material);
-  scene.add(videoSphere);
-  log('Video sphere added to scene');
-}
+// Moved entirely to sceneManager.js
 
 // ——————————————————————————————————————
 // In-VR Exit Button
@@ -291,24 +236,20 @@ function onSessionStart() {
   });
 
   log('=== XR SESSION STARTED ===');
-  log('Video paused? ' + videoElement.paused);
-  log('Video readyState: ' + videoElement.readyState);
-  log('Video currentTime: ' + videoElement.currentTime.toFixed(2));
-  log('Video muted: ' + videoElement.muted);
 
   // Unmute now — the "Enter VR" click counts as a user gesture
-  if (videoElement) {
-    videoElement.muted = false;
+  if (sceneManager.videoElement1) {
+    sceneManager.videoElement1.muted = false;
     log('Video unmuted');
 
-    var playPromise = videoElement.play();
+    var playPromise = sceneManager.videoElement1.play();
     if (playPromise) {
       playPromise.then(function () {
         log('Video play() resolved in VR (unmuted)');
       }).catch(function (err) {
         log('Video play() FAILED unmuted: ' + err.message + ' — falling back to muted');
-        videoElement.muted = true;
-        videoElement.play().then(function () {
+        sceneManager.videoElement1.muted = true;
+        sceneManager.videoElement1.play().then(function () {
           log('Video play() resolved MUTED (audio unavailable)');
         }).catch(function (err2) {
           log('Video play() STILL FAILED: ' + err2.message);
@@ -349,16 +290,13 @@ function animate() {
   frameCount++;
 
   // Log video state periodically (every 120 frames ~2s)
-  if (frameCount % 120 === 0 && videoElement && videoTexture) {
+  if (frameCount % 120 === 0 && sceneManager.videoElement1) {
     log('frame=' + frameCount +
-      ' | playing=' + !videoElement.paused +
-      ' | time=' + videoElement.currentTime.toFixed(1) +
-      ' | ready=' + videoElement.readyState +
+      ' | playing=' + !sceneManager.videoElement1.paused +
       ' | inVR=' + isInVR);
-
-    // Force texture update
-    videoTexture.needsUpdate = true;
   }
+
+  sceneManager.update();
 
   // Highlight exit button on hover
   if (isInVR && exitButton.visible) {
@@ -401,20 +339,23 @@ function setStatus(msg) {
 startBtn.addEventListener('click', function () {
   startBtn.disabled = true;
   startBtn.textContent = 'Loading...';
-  setStatus('Loading video...');
+  setStatus('Loading scene...');
 
-  loadVideo()
+  // 1. Initialize scene (loads textures, sets up 360 spheres)
+  sceneManager.init(scene)
     .then(function () {
-      createVideoSphere();
-      log('Attempting video.play()...');
-      return videoElement.play();
+      sceneManager.startPlayback();
+      // 2. Initialize Audio Manager (user gesture allows AudioContext)
+      return audioManager.init();
+    })
+    .then(function () {
+      // 3. Connect Gemini Live via WebSocket
+      return geminiManager.connect();
     })
     .then(function () {
       overlay.style.display = 'none';
-      log('Video playing successfully');
-      log('Video size: ' + videoElement.videoWidth + 'x' + videoElement.videoHeight);
-      log('Video duration: ' + videoElement.duration.toFixed(1) + 's');
-      setStatus('Video playing — enter VR with the button below');
+      log('Session started successfully');
+      setStatus('Session ready — enter VR with the button below');
     })
     .catch(function (err) {
       setStatus('Error: ' + err.message);

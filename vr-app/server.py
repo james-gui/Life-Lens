@@ -88,6 +88,21 @@ async def serve_three():
     return FileResponse(BASE_DIR / "three.min.js", media_type="application/javascript")
 
 
+@app.get("/sceneManager.js")
+async def serve_scene():
+    return FileResponse(BASE_DIR / "sceneManager.js", media_type="application/javascript")
+
+
+@app.get("/audioManager.js")
+async def serve_audio():
+    return FileResponse(BASE_DIR / "audioManager.js", media_type="application/javascript")
+
+
+@app.get("/geminiManager.js")
+async def serve_gemini():
+    return FileResponse(BASE_DIR / "geminiManager.js", media_type="application/javascript")
+
+
 @app.get("/")
 async def serve_index():
     return FileResponse(BASE_DIR / "index.html", media_type="text/html")
