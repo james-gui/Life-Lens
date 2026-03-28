@@ -1,27 +1,107 @@
 """
-FastAPI backend for VR Therapy app.
+FastAPI backend for Life Lens.
 
-Serves the frontend files and video assets to the Quest browser over local WiFi.
+Serves the Quest app, dashboard API, and local media assets over the same LAN.
 
 Usage:
     pip install fastapi uvicorn
     cd vr-app
     uvicorn server:app --host 0.0.0.0 --port 8000
-
-Then open http://<your-local-ip>:8000 on the Quest browser.
 """
 
+import json
 import socket
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import List, Optional
+from uuid import uuid4
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 app = FastAPI(title="VR Therapy Server")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 BASE_DIR = Path(__file__).parent
 ASSETS_DIR = BASE_DIR / "assets"
+DATA_DIR = BASE_DIR / "data"
+SESSIONS_DIR = DATA_DIR / "sessions"
+PATIENTS_FILE = DATA_DIR / "patients.json"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+class StagePayload(BaseModel):
+    id: str
+    title: str = Field(min_length=1)
+    scene: str = Field(min_length=1)
+    video_url: str = Field(min_length=1)
+    image_url: str = ""
+    duration_minutes: int = Field(default=5, ge=1, le=60)
+    therapist_goal: str = ""
+    script: str = Field(min_length=1)
+
+
+class SessionPayload(BaseModel):
+    title: str = Field(min_length=1)
+    patient_id: str = Field(min_length=1)
+    patient_name: str = ""
+    description: str = ""
+    music_url: str = ""
+    opening_prompt: str = ""
+    status: str = "draft"
+    stages: List[StagePayload] = Field(min_length=1)
+
+
+def _session_path(session_id: str) -> Path:
+    return SESSIONS_DIR / f"{session_id}.json"
+
+
+def _read_json(path: Path, fallback):
+    if not path.exists():
+        return fallback
+    return json.loads(path.read_text())
+
+
+def _write_json(path: Path, payload) -> None:
+    path.write_text(json.dumps(payload, indent=2))
+
+
+def _load_patient_index():
+    return _read_json(PATIENTS_FILE, {})
+
+
+def _save_patient_index(index) -> None:
+    _write_json(PATIENTS_FILE, index)
+
+
+def _load_session(session_id: str):
+    session_file = _session_path(session_id)
+    if not session_file.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _read_json(session_file, {})
+
+
+def _session_summary(session):
+    return {
+        "id": session["id"],
+        "title": session["title"],
+        "patient_id": session["patient_id"],
+        "patient_name": session.get("patient_name", ""),
+        "status": session.get("status", "draft"),
+        "stage_count": len(session.get("stages", [])),
+        "updated_at": session.get("updated_at"),
+    }
 
 
 # ——————————————————————————————————————
@@ -73,6 +153,89 @@ async def serve_asset(filename: str, request: Request):
 
     # Full file response
     return FileResponse(file_path, media_type=content_type)
+
+
+# ——————————————————————————————————————
+# Session API for therapist dashboard + Quest runtime
+# ——————————————————————————————————————
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+
+@app.get("/sessions/{session_id}")
+async def get_session(session_id: str):
+    return _load_session(session_id)
+
+
+@app.post("/sessions", status_code=201)
+async def create_session(payload: SessionPayload):
+    session_id = f"session-{uuid4().hex[:8]}"
+    now = datetime.now(timezone.utc).isoformat()
+    session = {
+        "id": session_id,
+        "title": payload.title,
+        "patient_id": payload.patient_id,
+        "patient_name": payload.patient_name,
+        "description": payload.description,
+        "music_url": payload.music_url,
+        "opening_prompt": payload.opening_prompt,
+        "status": payload.status,
+        "stages": [stage.model_dump() for stage in payload.stages],
+        "created_at": now,
+        "updated_at": now,
+        "gemini_script": {
+            "opening_prompt": payload.opening_prompt,
+            "stages": [
+                {"scene": stage.scene, "script": stage.script}
+                for stage in payload.stages
+            ],
+        },
+    }
+
+    _write_json(_session_path(session_id), session)
+
+    patient_index = _load_patient_index()
+    patient_sessions = patient_index.setdefault(
+        payload.patient_id,
+        {
+            "patient_id": payload.patient_id,
+            "patient_name": payload.patient_name,
+            "session_ids": [],
+        },
+    )
+    patient_sessions["patient_name"] = payload.patient_name
+    patient_sessions["session_ids"] = list(
+        dict.fromkeys([session_id] + patient_sessions["session_ids"])
+    )
+    _save_patient_index(patient_index)
+
+    return session
+
+
+@app.get("/patients/{patient_id}/sessions")
+async def list_patient_sessions(patient_id: str):
+    patient_index = _load_patient_index()
+    patient = patient_index.get(patient_id)
+    if not patient:
+        return {
+            "patient_id": patient_id,
+            "patient_name": "",
+            "sessions": [],
+        }
+
+    sessions = []
+    for session_id in patient.get("session_ids", []):
+        session_file = _session_path(session_id)
+        if session_file.exists():
+            sessions.append(_session_summary(_read_json(session_file, {})))
+
+    sessions.sort(key=lambda item: item.get("updated_at", ""), reverse=True)
+    return {
+        "patient_id": patient_id,
+        "patient_name": patient.get("patient_name", ""),
+        "sessions": sessions,
+    }
 
 
 # ——————————————————————————————————————
