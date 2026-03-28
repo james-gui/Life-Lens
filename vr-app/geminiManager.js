@@ -2,19 +2,30 @@ class GeminiManager {
     constructor() {
         this.ws = null;
         this.apiKey = null;
+        this.systemPrompt = null;
 
         this.audioContext = null;
         this.processorNode = null;
         this.mediaStream = null;
+        this.micSource = null;
 
         // Audio playback queue
         this.playQueue = [];
         this.isPlaying = false;
         this.nextPlayTime = 0;
+
+        // Reconnection
+        this.shouldReconnect = true;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.reconnectDelay = 2000; // ms
+        this.micReady = false;
     }
 
     async connect() {
         log('GeminiManager: Connecting to Gemini Live API...');
+        this.shouldReconnect = true;
+        this.reconnectAttempts = 0;
 
         // 0. Fetch API key from server
         try {
@@ -31,14 +42,33 @@ class GeminiManager {
             return;
         }
 
-        // 1. We share the AudioContext from audioManager since it's already initialized by a user gesture
+        // 1. Fetch the therapy script from script.md
+        try {
+            const scriptRes = await fetch('/script.md');
+            this.systemPrompt = await scriptRes.text();
+            log('GeminiManager: loaded script.md (' + this.systemPrompt.length + ' chars)');
+        } catch (err) {
+            log('GeminiManager error: failed to load script.md — ' + err.message);
+            return;
+        }
+
+        // 2. Share AudioContext from audioManager
         this.audioContext = audioManager.audioContext;
         if (!this.audioContext) {
             log('GeminiManager error: audioContext not initialized');
             return;
         }
 
-        // 2. Open WebSocket
+        // 3. Setup microphone (once)
+        if (!this.micReady) {
+            await this.setupMicrophone();
+        }
+
+        // 4. Open WebSocket
+        this.openWebSocket();
+    }
+
+    openWebSocket() {
         const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${this.apiKey}`;
         this.ws = new WebSocket(url);
 
@@ -46,15 +76,12 @@ class GeminiManager {
         this.ws.onmessage = this.onMessage.bind(this);
         this.ws.onerror = this.onError.bind(this);
         this.ws.onclose = this.onClose.bind(this);
-
-        // 3. Setup Microphone Capture (this prompts user for mic permissions)
-        await this.setupMicrophone();
     }
 
     onOpen() {
         log('GeminiManager: WebSocket opened. Sending setup config...');
+        this.reconnectAttempts = 0; // Reset on successful connect
 
-        // v1beta raw WebSocket format — uses "setup" wrapper
         const setupMessage = {
             setup: {
                 model: "models/gemini-2.5-flash-native-audio-preview-12-2025",
@@ -68,28 +95,19 @@ class GeminiManager {
                 },
                 systemInstruction: {
                     parts: [{
-                        text: `You are a therapist guiding a patient through a structured VR meditation session. You MUST follow this script sequentially stage-by-stage.
-
-Stage 1 (Start): You are in the 'meadow'. Welcome the user and lead a 3-breath grounding exercise. Say "breathe in", wait, then say "breathe out" etc. Wait for the user to respond before continuing.
-Stage 2 (Middle): When they are relaxed from Stage 1, call the switch_scene tool with scene_name="ocean". Guide them to visualize the waves washing away their tension.
-Stage 3 (End): When they are fully relaxed, call switch_scene with scene_name="mountain". Provide a final grounding message to gently conclude the session.
-
-Rules:
-- Speak softly, slowly, and concisely (1-2 sentences max at a time).
-- Do not rush. Allow the user to speak, respond, or breathe in between your instructions.
-- You MUST call the switch_scene tool to advance the visual environment at the exact moments of transition between stages.`
+                        text: this.systemPrompt
                     }]
                 },
                 tools: [{
                     functionDeclarations: [{
                         name: "switch_scene",
-                        description: "Changes the VR environment to a new scene.",
+                        description: "Changes the VR environment to a new scene. You MUST call this when transitioning between stages. The scene_name should be 'ocean' or 'mountain'.",
                         parameters: {
                             type: "OBJECT",
                             properties: {
                                 scene_name: {
                                     type: "STRING",
-                                    description: "The name of the scene to switch to, e.g. 'ocean', 'forest', 'mountains'."
+                                    description: "The scene to switch to: 'ocean' or 'mountain'"
                                 }
                             },
                             required: ["scene_name"]
@@ -99,7 +117,7 @@ Rules:
             }
         };
 
-        log('GeminiManager: Sending setup: ' + JSON.stringify(setupMessage).substring(0, 200) + '...');
+        log('GeminiManager: Sending setup with script.md (' + this.systemPrompt.length + ' chars)');
         this.ws.send(JSON.stringify(setupMessage));
     }
 
@@ -114,24 +132,19 @@ Rules:
                 }
             });
 
-            const source = this.audioContext.createMediaStreamSource(this.mediaStream);
-
-            // Use ScriptProcessorNode to capture chunks. 
-            // (For production, AudioWorklets are preferred, but this is simple for demo)
+            this.micSource = this.audioContext.createMediaStreamSource(this.mediaStream);
             this.processorNode = this.audioContext.createScriptProcessor(4096, 1, 1);
 
             this.processorNode.onaudioprocess = (e) => {
                 if (this.ws && this.ws.readyState === WebSocket.OPEN) {
                     const inputData = e.inputBuffer.getChannelData(0);
 
-                    // Convert Float32 (-1 to 1) to Int16
                     const pcm16 = new Int16Array(inputData.length);
                     for (let i = 0; i < inputData.length; i++) {
                         let s = Math.max(-1, Math.min(1, inputData[i]));
                         pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
                     }
 
-                    // Base64 encode the binary buffer
                     const buffer = new Uint8Array(pcm16.buffer);
                     let binary = '';
                     for (let i = 0; i < buffer.byteLength; i++) {
@@ -139,7 +152,6 @@ Rules:
                     }
                     const base64 = btoa(binary);
 
-                    // Construct ClientContent PCM chunk
                     const audioMessage = {
                         realtimeInput: {
                             mediaChunks: [{
@@ -153,9 +165,10 @@ Rules:
                 }
             };
 
-            source.connect(this.processorNode);
+            this.micSource.connect(this.processorNode);
             this.processorNode.connect(this.audioContext.destination);
-            log('GeminiManager: Microphone capture actively streaming at 16kHz.');
+            this.micReady = true;
+            log('GeminiManager: Microphone capture ready at 16kHz.');
         } catch (err) {
             log('GeminiManager: Microphone permission denied or error: ' + err.message);
         }
@@ -294,7 +307,35 @@ Rules:
     }
 
     onClose(event) {
-        log(`GeminiManager: WebSocket closed => code: ${event.code}, reason: ${event.reason}`);
+        log('GeminiManager: WebSocket closed => code: ' + event.code + ', reason: ' + (event.reason || 'none'));
+
+        // Clear any pending audio
+        this.playQueue = [];
+        this.isPlaying = false;
+
+        // Auto-reconnect if not intentionally disconnected
+        if (this.shouldReconnect && this.reconnectAttempts < this.maxReconnectAttempts) {
+            this.reconnectAttempts++;
+            var delay = this.reconnectDelay * this.reconnectAttempts;
+            log('GeminiManager: reconnecting in ' + (delay / 1000) + 's (attempt ' + this.reconnectAttempts + '/' + this.maxReconnectAttempts + ')');
+            setTimeout(() => {
+                if (this.shouldReconnect) {
+                    log('GeminiManager: reconnecting now...');
+                    this.openWebSocket();
+                }
+            }, delay);
+        } else if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+            log('GeminiManager: max reconnect attempts reached. Call geminiManager.connect() to retry.');
+        }
+    }
+
+    disconnect() {
+        this.shouldReconnect = false;
+        if (this.ws) {
+            this.ws.close();
+            this.ws = null;
+        }
+        log('GeminiManager: disconnected');
     }
 }
 

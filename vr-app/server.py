@@ -108,6 +108,11 @@ async def serve_audio():
     return FileResponse(BASE_DIR / "audioManager.js", media_type="application/javascript")
 
 
+@app.get("/script.md")
+async def serve_script():
+    return FileResponse(BASE_DIR / "script.md", media_type="text/plain; charset=utf-8")
+
+
 @app.get("/geminiManager.js")
 async def serve_gemini():
     return FileResponse(BASE_DIR / "geminiManager.js", media_type="application/javascript")
